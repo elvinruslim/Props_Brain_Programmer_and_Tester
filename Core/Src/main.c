@@ -27,11 +27,16 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+enum SlaveMode {
+	Receiving,
+	Transmitting,
+	Listening
+} slaveMode = Listening;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define BUFFER_SIZE 9
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,8 +54,26 @@ const osThreadAttr_t defaultTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for buttonTask */
+osThreadId_t buttonTaskHandle;
+const osThreadAttr_t buttonTask_attributes = {
+  .name = "buttonTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* USER CODE BEGIN PV */
+uint8_t receivingBuffer[BUFFER_SIZE] = {0};
+uint8_t receivingBufferDataSize = 0;
 
+uint8_t transmittingBuffer[BUFFER_SIZE] = {0};
+uint8_t transmittingBufferDataSize = 0;
+
+uint16_t count = 0;
+uint8_t RxData[BUFFER_SIZE];
+
+uint8_t i2cButtonData[4] = {0x15, 0x01, 0xFE, 0x10};
+
+uint8_t buttonState = 0; // 0 unpressed, 1 pressed
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,9 +81,56 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C2_Init(void);
 void StartDefaultTask(void *argument);
+void StartButtonTask(void *argument);
 
 /* USER CODE BEGIN PFP */
+void toggleGPIO(GPIO_TypeDef * GPIO_Port, uint16_t GPIO_Pin);
+void i2c_send_button(I2C_HandleTypeDef *hi2c);
 
+extern void HAL_I2C_ListenCpltCallback (I2C_HandleTypeDef *hi2c)
+{
+	HAL_I2C_EnableListen_IT(hi2c);
+}
+
+extern void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, uint16_t AddrMatchCode)
+{
+	if(TransferDirection == I2C_DIRECTION_TRANSMIT)  // if the master wants to transmit the data
+	{
+		HAL_I2C_Slave_Sequential_Receive_IT(hi2c, RxData, 9, I2C_FIRST_AND_LAST_FRAME);
+	}
+	else  // master requesting the data is not supported yet
+	{
+		toggleGPIO(LED_B_GPIO_Port, LED_B_Pin);
+		HAL_I2C_Slave_Sequential_Receive_IT(hi2c, RxData, 1, I2C_FIRST_AND_LAST_FRAME);
+		if(buttonState)
+		{
+			i2cButtonData[1] = 0x01;
+			i2cButtonData[2] = 0xFE;
+		}
+		else
+		{
+			i2cButtonData[1] = 0x00;
+			i2cButtonData[2] = 0xFF;
+		}
+		i2c_send_button(hi2c);
+//		Error_Handler();  // call error handler
+	}
+}
+
+void i2c_send_button(I2C_HandleTypeDef *hi2c)
+{
+	HAL_I2C_Slave_Seq_Transmit_IT(hi2c, i2cButtonData, 4, I2C_FIRST_AND_LAST_FRAME);
+}
+
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+	count++;
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+	HAL_I2C_EnableListen_IT(hi2c);
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -129,6 +199,9 @@ int main(void)
   /* Create the thread(s) */
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* creation of buttonTask */
+  buttonTaskHandle = osThreadNew(StartButtonTask, NULL, &buttonTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -210,7 +283,7 @@ static void MX_I2C2_Init(void)
   hi2c2.Instance = I2C2;
   hi2c2.Init.ClockSpeed = 100000;
   hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c2.Init.OwnAddress1 = 52;
+  hi2c2.Init.OwnAddress1 = 26;
   hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c2.Init.OwnAddress2 = 0;
@@ -321,20 +394,51 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
 //	printf("Entering programming mode\n");
-	brainEnterProgramMode();
+//	brainEnterProgramMode();
+	HAL_I2C_EnableListen_IT(&hi2c2);
   /* Infinite loop */
   for(;;)
   {
-//  	printf("Turn on brain\n");
+  	printf("Turn on brain\n");
   	brainPower(1);
   	toggleGPIO(LED_R_GPIO_Port, LED_R_Pin);
     osDelay(500);
-    toggleGPIO(LED_G_GPIO_Port, LED_G_Pin);
-    osDelay(500);
-    toggleGPIO(LED_B_GPIO_Port, LED_B_Pin);
-    osDelay(500);
+    if(count>0)
+    {
+    	count--;
+      toggleGPIO(LED_G_GPIO_Port, LED_G_Pin);
+    }
+//    osDelay(500);
+//    toggleGPIO(LED_B_GPIO_Port, LED_B_Pin);
+//    osDelay(500);
   }
   /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartButtonTask */
+/**
+* @brief Function implementing the buttonTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartButtonTask */
+void StartButtonTask(void *argument)
+{
+  /* USER CODE BEGIN StartButtonTask */
+  /* Infinite loop */
+  for(;;)
+  {
+  	if(HAL_GPIO_ReadPin(Button_GPIO_Port, Button_Pin)) //if not pressed
+  	{
+  		buttonState = 0;
+  	}
+  	else
+  	{
+  		buttonState = 1;
+  	}
+    osDelay(20);
+  }
+  /* USER CODE END StartButtonTask */
 }
 
 /**
